@@ -1,13 +1,16 @@
-"""口述史转录稿勘误供数 API（FastAPI + SQLite）。
+"""口述史转录稿勘误供数与转写质量评测 API（FastAPI + SQLite）。
 
 - POST   /documents                                  导入正文与实体标注
 - GET    /documents                                  文档列表
 - GET    /documents/{doc_id}                         版本查询：正文 + 有效标注区间 + 待复核标注
-- POST   /documents/{doc_id}/corrections             应用一笔勘误，返回勘误号
+- POST   /documents/{doc_id}/corrections             应用一笔勘误，返回勘误号与受影响批次
 - POST   /documents/{doc_id}/corrections/{n}/retract 按号撤回（冲突则 409 并保留现版）
 - GET    /documents/{doc_id}/corrections             勘误流水
 - GET    /documents/{doc_id}/entities                实体检索（kind / q 过滤）
 - GET    /documents/{doc_id}/entities/{number}       单个实体
+- POST   /batches                                    按批次号收录两家转写并出分
+- GET    /batches/{batch_id}                         评测报告：逐稿版号/错误数、字错率、待复算
+- POST   /batches/{batch_id}/recompute               仅重比待复算稿件并按整批版号校验提交
 """
 
 from __future__ import annotations
@@ -19,7 +22,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from . import db, service
+from . import db, service, scoring
 
 
 @asynccontextmanager
@@ -80,6 +83,18 @@ class CorrectionIn(BaseModel):
     text: str = Field(default="", description="替换文本；区间为空即插入，文本为空即删除")
 
 
+class BatchItemIn(BaseModel):
+    manuscript_number: str = Field(min_length=1, description="稿号，批次内唯一")
+    document_id: int = Field(description="馆内参考稿文档 ID")
+    vendor_a: str = Field(default="", description="供应商 A 的转写文本")
+    vendor_b: str = Field(default="", description="供应商 B 的转写文本")
+
+
+class BatchIn(BaseModel):
+    batch_id: str = Field(min_length=1, description="批次号")
+    items: list[BatchItemIn] = Field(min_length=1, description="逐稿两家转写文本")
+
+
 # ---------------------------------------------------------------- 异常映射
 
 @app.exception_handler(service.NotFoundError)
@@ -98,6 +113,16 @@ async def conflict_handler(request, exc: service.ConflictError):
     return JSONResponse(
         status_code=409,
         content={"detail": str(exc), "conflicts": exc.conflicts},
+    )
+
+
+@app.exception_handler(scoring.VersionConflictError)
+async def version_conflict_handler(request, exc: scoring.VersionConflictError):
+    # 评分/复算提交时发现参考稿换版：列出换版稿号，已有成绩原样保留
+    return JSONResponse(
+        status_code=409,
+        content={"detail": str(exc),
+                 "changed_manuscripts": exc.changed_manuscripts},
     )
 
 
@@ -154,3 +179,34 @@ def entity(doc_id: int, number: int):
         if item["number"] == number:
             return item
     raise HTTPException(status_code=404, detail=f"实体编号不存在: {number}")
+
+
+# ---------------------------------------------------------------- 批次评测
+
+@app.post("/batches", status_code=201)
+def create_batch(payload: BatchIn):
+    """按稿号收录两家转写并出分。
+
+    长计算在写事务之外完成（期间勘误/撤回照常写入），提交时复查整批参考版号：
+    换版则 409 且不写任何成绩；参考总字符数为零则 400 拒绝出分。
+    """
+    items_in = [it.model_dump() for it in payload.items]
+    snapshot = _read(scoring.snapshot_new_batch, payload.batch_id, items_in)
+    computed = scoring.compute_new_batch(snapshot)
+    return _write(scoring.commit_new_batch, snapshot, computed)
+
+
+@app.get("/batches/{batch_id}")
+def batch_report(batch_id: str):
+    """逐稿列出参考版号与两家错误数、两家字错率及待复算稿号。"""
+    return _read(scoring.get_batch_report, batch_id)
+
+
+@app.post("/batches/{batch_id}/recompute")
+def recompute_batch(batch_id: str):
+    """只重比待复算稿件；整批版号未变才更新成绩并清除待复算标记。"""
+    snapshot = _read(scoring.snapshot_recompute, batch_id)
+    if not snapshot["pending"]:
+        return _read(scoring.get_batch_report, batch_id)
+    recomputed = scoring.compute_recompute(snapshot)
+    return _write(scoring.commit_recompute, snapshot, recomputed)

@@ -63,6 +63,24 @@ CREATE TABLE IF NOT EXISTS entity_effects (
     correction_number INTEGER NOT NULL,  -- 影响该标注的仍生效勘误
     PRIMARY KEY (document_id, entity_id, correction_number)
 );
+CREATE TABLE IF NOT EXISTS batches (
+    batch_id        TEXT PRIMARY KEY,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS batch_items (
+    batch_id           TEXT NOT NULL REFERENCES batches(batch_id),
+    manuscript_number  TEXT NOT NULL,             -- 稿号（批次内唯一）
+    document_id        INTEGER NOT NULL REFERENCES documents(id),
+    vendor             TEXT NOT NULL CHECK (vendor IN ('a', 'b')),
+    transcript         TEXT NOT NULL,             -- 该供应商当时提交的转写文本
+    errors             INTEGER NOT NULL,          -- 最近一次成绩：最少字符编辑次数
+    reference_length   INTEGER NOT NULL,          -- 成绩对应的参考稿字符数
+    reference_revision INTEGER NOT NULL,          -- 成绩所用参考版号（文档 revision）
+    pending            INTEGER NOT NULL DEFAULT 0 CHECK (pending IN (0, 1)),  -- 待复算标记
+    PRIMARY KEY (batch_id, manuscript_number, vendor)
+);
+CREATE INDEX IF NOT EXISTS idx_batch_items_document
+    ON batch_items (document_id, batch_id);
 """
 
 

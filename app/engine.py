@@ -191,3 +191,30 @@ def edit_touches_span(s: int, e: int, has_text: bool, ca: int, cb: int) -> bool:
     if has_text and s == e and ca < s < cb:
         return True
     return False
+
+
+# ---------------------------------------------------------------- 编辑距离
+
+def levenshtein(a: str, b: str) -> int:
+    """把 a 改成 b 所需的最少字符编辑次数（插入/删除/替换各计 1 次）。
+
+    按 Unicode 码点计字符；两行滚动数组，时间 O(len(a)*len(b))，空间 O(len(b))。
+    """
+    if a == b:
+        return 0
+    # 距离对称，让 b 保持较短以压缩滚动数组
+    if len(a) < len(b):
+        a, b = b, a
+    if not b:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(
+                prev[j] + 1,                      # 删除 a 的一个字符
+                cur[j - 1] + 1,                   # 插入 b 的一个字符
+                prev[j - 1] + (ca != cb),         # 替换或匹配
+            ))
+        prev = cur
+    return prev[-1]

@@ -1,8 +1,10 @@
-# 口述史转录稿勘误供数 API
+# 口述史转录稿勘误供数与转写质量评测 API
 
-FastAPI + SQLite 实现的转录稿勘误版本管理服务。支持：导入正文与带编号的人名/
+FastAPI + SQLite 实现的转录稿勘误版本管理与供应商转写质量评测服务。支持：导入正文与带编号的人名/
 地名标注、按当前版应用勘误（左闭右开区间替换，含插入与删除）、按勘误号撤回
-（带冲突检测）、标注待复核跟踪、实体检索，以及同一版本的一致性查询。
+（带冲突检测）、标注待复核跟踪、实体检索，以及同一版本的一致性查询；并支持按
+批次对**两家供应商**的转写文本以馆内现稿为共同参考出分、勘误后待复算登记与
+按整批版号保护的安全复算。
 
 ## 启动
 
@@ -52,6 +54,9 @@ python3 -m unittest discover -s tests -p 'test_engine.py'   # 仅引擎（零依
 | GET | `/documents/{doc}/corrections` | 勘误流水（含状态与触及关系） |
 | GET | `/documents/{doc}/entities?kind=&q=` | 实体检索（按人名/地名、名称子串） |
 | GET | `/documents/{doc}/entities/{number}` | 单个实体 |
+| POST | `/batches` | 按批次号收录两家逐稿转写并出分 |
+| GET | `/batches/{batch_id}` | 评测报告：逐稿参考版号/两家错误数、字错率、待复算稿号 |
+| POST | `/batches/{batch_id}/recompute` | 仅重比待复算稿件，按整批版号校验后提交 |
 
 ## 示例
 
@@ -92,6 +97,60 @@ curl -X POST localhost:8000/documents/1/corrections/1/retract
 # => 409 {"detail": "存在仍生效的冲突后续勘误，保留现版", "conflicts": [2]}
 ```
 
+## 两家供应商转写质量评测
+
+同一批访谈抽检两家供应商，按稿号各收录一份转写文本，以馆内现稿（文档当前版）
+为共同参考。
+
+- **错误数**：把转写稿改成参考稿所需的最少字符编辑次数（Levenshtein 距离），
+  插入、删除、替换一个字符各计一次（按 Unicode 码点计字符）。
+- **字错率（CER）**：该家总错误数 ÷ 参考总字符数；整批参考总字符数为零时
+  拒绝出分（`400`），不写入任何成绩。
+- **参考版号**：取文档单调递增的 `revision`，逐稿随成绩保存。
+
+### 出分与查询
+
+```bash
+# 建批：按稿号给出参考文档 ID 与 vendor_a / vendor_b 两份转写
+curl -X POST localhost:8000/batches -H 'Content-Type: application/json' -d '{
+  "batch_id": "LOT-2026-11",
+  "items": [
+    {"manuscript_number": "MS-01", "document_id": 1,
+     "vendor_a": "今天天气很好", "vendor_b": "今天天汽很好"},
+    {"manuscript_number": "MS-02", "document_id": 2,
+     "vendor_a": "采访结速", "vendor_b": "采访结束"}
+  ]}'
+# 报告逐稿列出 reference_revision 与两家 errors，并汇总两家字错率
+curl localhost:8000/batches/LOT-2026-11
+```
+
+### 勘误/撤回与待复算
+
+对参考稿应用勘误或撤回时，引用该稿的批次在**同一事务**内登记待复算，回执的
+`affected_batches` 列出受影响批次号；评分期间勘误与撤回照常写入。查批次时
+上次成绩原样保留，`pending_manuscripts` 给出待复算稿号。复算只重比这些稿件：
+
+```bash
+curl -X POST localhost:8000/documents/1/corrections \
+  -H 'Content-Type: application/json' -d '{"start": 0, "end": 2, "text": "今日"}'
+# => {"correction_number": 1, ..., "affected_batches": ["LOT-2026-11"]}
+
+curl localhost:8000/batches/LOT-2026-11
+# => ..., "pending_manuscripts": ["MS-01"]，逐稿旧成绩与旧版号仍可查
+
+curl -X POST localhost:8000/batches/LOT-2026-11/recompute
+```
+
+### 换版保护
+
+Levenshtein 长计算在写事务**之外**完成，提交时另开短事务复查**整批**参考稿
+版号：
+
+- 版号全部与计算所用版本一致：更新两家逐稿成绩并清除待复算标记；
+- 发现任何稿件换版：返回 `409` 与 `changed_manuscripts` 稿号列表，已有成绩
+  原样保留、待复算标记保留，可在换版后的新参考上再次复算；
+- 写入失败（事务回滚）同样不改动任何已有成绩。
+
 ## 实现要点
 
 当前版正文用**片段表**表示：每个片段引用原文的一段、某笔勘误写入文本的一
@@ -103,11 +162,13 @@ curl -X POST localhost:8000/documents/1/corrections/1/retract
 
 ```
 app/
-  engine.py   # 片段表核心算法（纯 Python，零依赖）
+  engine.py   # 片段表核心算法与 Levenshtein 编辑距离（纯 Python，零依赖）
   db.py       # SQLite 模式与存取
-  service.py  # 业务操作（导入/勘误/撤回/查询/检索）
+  service.py  # 勘误业务（导入/勘误/撤回/查询/检索），含待复算登记
+  scoring.py  # 批次评测（快照/长计算/版号校验提交/复算/报告）
   main.py     # FastAPI 路由与事务
 tests/
   test_engine.py  # 引擎单元测试（标准库即可运行）
-  test_api.py     # API 集成测试
+  test_api.py     # 勘误 API 集成测试
+  test_scoring.py # 批次评测集成测试
 ```

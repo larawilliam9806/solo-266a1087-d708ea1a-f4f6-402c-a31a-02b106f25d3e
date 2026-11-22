@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from . import db, engine
+from . import db, engine, scoring
 
 
 class NotFoundError(Exception):
@@ -111,7 +111,10 @@ def apply_correction(conn: sqlite3.Connection, doc_id: int,
     )
     db.save_pieces(conn, doc_id, new_pieces)
     revision = _bump_revision(conn, doc_id)
-    return {"correction_number": number, "kind": kind, "revision": revision}
+    # 参考稿换版：引用它的批次项同事务登记待复算，回执列出受影响批次号
+    affected_batches = scoring.mark_pending_for_document(conn, doc_id)
+    return {"correction_number": number, "kind": kind, "revision": revision,
+            "affected_batches": affected_batches}
 
 
 def retract_correction(conn: sqlite3.Connection, doc_id: int, number: int) -> dict:
@@ -151,7 +154,10 @@ def retract_correction(conn: sqlite3.Connection, doc_id: int, number: int) -> di
         (doc_id, number),
     )
     revision = _bump_revision(conn, doc_id)
-    return {"retracted": number, "revision": revision}
+    # 撤回同样改变参考稿当前版：同事务登记待复算并回执受影响批次号
+    affected_batches = scoring.mark_pending_for_document(conn, doc_id)
+    return {"retracted": number, "revision": revision,
+            "affected_batches": affected_batches}
 
 
 # ---------------------------------------------------------------- 查询

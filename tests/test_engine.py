@@ -175,5 +175,34 @@ class TouchSpanTest(unittest.TestCase):
         self.assertFalse(T(8, 8, True, 4, 8))
 
 
+class LevenshteinTest(unittest.TestCase):
+    def test_identical(self):
+        self.assertEqual(engine.levenshtein("", ""), 0)
+        self.assertEqual(engine.levenshtein("abc", "abc"), 0)
+
+    def test_empty_side(self):
+        self.assertEqual(engine.levenshtein("", "abc"), 3)      # 三次插入
+        self.assertEqual(engine.levenshtein("abcd", ""), 4)     # 四次删除
+
+    def test_basic_edits(self):
+        self.assertEqual(engine.levenshtein("kitten", "sitting"), 3)
+        self.assertEqual(engine.levenshtein("ABCDEFG", "ABXYEFG"), 2)   # C->X D->Y
+        self.assertEqual(engine.levenshtein("张三住在北京市", "张三住在天津市"), 2)
+
+    def test_insert_delete_replace_each_cost_one(self):
+        self.assertEqual(engine.levenshtein("ac", "abc"), 1)    # 插入 b
+        self.assertEqual(engine.levenshtein("abc", "ac"), 1)    # 删除 b
+        self.assertEqual(engine.levenshtein("abc", "axc"), 1)   # 替换 b
+
+    def test_unicode_codepoints(self):
+        # 按码点计字符：表情符号与汉字各计一个字符
+        self.assertEqual(engine.levenshtein("你好", "你坏"), 1)
+        self.assertEqual(engine.levenshtein("a😀b", "a😀bc"), 1)
+
+    def test_symmetric(self):
+        for a, b in [("ABCDE", "ABXDE"), ("", "x"), ("qwerty", "qwert")]:
+            self.assertEqual(engine.levenshtein(a, b), engine.levenshtein(b, a))
+
+
 if __name__ == "__main__":
     unittest.main()
